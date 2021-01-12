@@ -1,6 +1,5 @@
 #[macro_use] extern crate log;
 
-mod hsm;
 mod agent;
 
 use agent::Agent;
@@ -13,9 +12,9 @@ use rustica::{  CertificateRequest,
                 ChallengeResponse,
             };
 
-use rustica_sshkey::{CertType, Certificate, PublicKey as SSHPublicKey, PublicKeyKind as SSHPublicKeyKind};
+use rustica_sshkey::ssh::{CertType, Certificate, PublicKey as SSHPublicKey, PublicKeyKind as SSHPublicKeyKind};
 
-use hsm::yubikey::{asn_cert_signer, ssh_cert_signer, provision, ssh_cert_fetch_pubkey};
+use rustica_sshkey::yubikey::{asn_cert_signer, ssh_cert_signer, provision, ssh_cert_fetch_pubkey};
 
 use std::collections::HashMap;
 use yubikey_piv::key::{RetiredSlotId, SlotId};
