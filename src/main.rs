@@ -1,94 +1,24 @@
 #[macro_use] extern crate log;
 
 mod agent;
+mod rustica;
 
-use agent::{Agent, error::Error as AgentError, Identity, Response};
+use agent::{Agent, error::Error as AgentError, Identity, SSHAgentHandler, Response};
 use std::os::unix::net::{UnixListener};
 
-use rustica::rustica_client::{RusticaClient};
-use rustica::{CertificateRequest, ChallengeRequest};
+use rustica::refresh_certificate;
+use rustica_sshkey::yubikey::ssh_cert_signer;
 
-use rustica_sshkey::yubikey::{asn_cert_signer, ssh_cert_signer, ssh_cert_fetch_pubkey};
-
-use std::collections::HashMap;
 use std::time::SystemTime;
-use tokio::runtime::Runtime;
 use yubikey_piv::key::{RetiredSlotId, SlotId};
 
-pub mod rustica {
-    tonic::include_proto!("rustica");
-}
 
 struct Handler {
     cert: Option<Identity>,
     stale_at: u64,
 }
 
-async fn refresh_certificate() -> Option<Identity> {
-    let user_key_slot = SlotId::Retired(RetiredSlotId::R13);
-    let ssh_pubkey = ssh_cert_fetch_pubkey(user_key_slot).unwrap();
-    
-    let encoded_key = format!("{}", ssh_pubkey);
-    println!("Requesting cert for key with fingerprint: {}", ssh_pubkey.fingerprint());
-    let request = tonic::Request::new(ChallengeRequest {
-        pubkey: encoded_key.to_string(),
-    });
-
-    let mut client = match RusticaClient::connect("http://[::1]:50051").await {
-        Ok(client) => client,
-        Err(_e) => return None,
-    };
-
-    let response = match client.challenge(request).await {
-        Ok(response) => response,
-        Err(_e) => return None,
-    };
-
-    let mut extensions = HashMap::new();
-    extensions.insert(String::from("permit-X11-forwarding"), String::from(""));
-    extensions.insert(String::from("permit-agent-forwarding"), String::from(""));
-    extensions.insert(String::from("permit-port-forwarding"), String::from(""));
-    extensions.insert(String::from("permit-pty"), String::from(""));
-    extensions.insert(String::from("permit-user-rc"), String::from(""));
-
-    let response = response.into_inner();
-    let challenge_signature = hex::encode(asn_cert_signer(&hex::decode(&response.challenge).unwrap(), user_key_slot).unwrap());
-    let request = tonic::Request::new(CertificateRequest {
-        pubkey: encoded_key.to_string(),
-        cert_type: 1,
-        key_id: String::from("JITC-Rustica-Agent"),
-        challenge_time: response.time,
-        critical_options: HashMap::new(),
-        extensions: extensions,
-        servers: vec!["atheris".to_string()],
-        principals: vec!["obelisk".to_string()],
-        valid_before: 0xFFFFFFFFFFFFFFFF,
-        valid_after: 0x0,
-        challenge: response.challenge,
-        challenge_signature,
-    });
-
-    let mut client = match RusticaClient::connect("http://[::1]:50051").await {
-        Ok(c) => c,
-        Err(_e) => return None,
-    };
-
-    let response = match client.certificate(request).await {
-        Ok(r) => r,
-        Err(_e) => return None,
-    };
-
-    let response = response.into_inner();
-    
-    let cert: Vec<&str> = response.certificate.split(" ").collect();
-
-    Some(agent::Identity {
-        key_blob: base64::decode(cert[1]).unwrap(),
-        key_comment: "JIT Cert".to_string(),
-    })
-}
-
-impl agent::SSHAgentHandler for Handler {
+impl SSHAgentHandler for Handler {
     fn new() -> Self {
         Handler {
             cert: None,
@@ -104,15 +34,17 @@ impl agent::SSHAgentHandler for Handler {
                 return Ok(Response::Identities(vec![cert.clone()]));
             }
         }
-        Runtime::new().unwrap().block_on(async {
-            match refresh_certificate().await {
-                Some(identity) => {
-                    self.cert = Some(identity.clone());
-                    Ok(Response::Identities(vec![identity]))
-                },
-                None => Err(agent::error::Error::from("Could not refresh certificate")),
-            }
-        })
+        match refresh_certificate() {
+            Some(cert) => {
+                let ident = Identity {
+                    key_blob: cert.cert,
+                    key_comment: cert.comment,
+                };
+                self.cert = Some(ident.clone());
+                Ok(Response::Identities(vec![ident]))
+            },
+            None => Err(agent::error::Error::from("Could not refresh certificate")),
+        }
     }
 
     fn sign_request(&mut self, pubkey: Vec<u8>, data: Vec<u8>, flags: u32) -> Result<agent::Response, agent::error::Error> {
@@ -124,7 +56,7 @@ impl agent::SSHAgentHandler for Handler {
             signature,
         };
 
-        return Ok(response);
+        Ok(response)
     }
 }
 
