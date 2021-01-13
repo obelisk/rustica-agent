@@ -140,7 +140,7 @@ enum MessageResponse {
 	AgentSignResponse = 14,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Identity {
     pub key_blob: Vec<u8>,
     pub key_comment: String,
