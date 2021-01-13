@@ -30,7 +30,6 @@ impl Agent {
 		for stream in listener.incoming() {
 			match stream {
 				Ok(stream) => {
-					// connection succeded
 					let ref_handler = arc_handler.clone();
 					thread::spawn( ||{
 						match Agent::handle_client(ref_handler, stream){

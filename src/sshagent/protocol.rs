@@ -74,10 +74,9 @@ pub enum Request {
     },
     Unknown,
 }
+
 impl Request {
-
 	pub fn read(stream: &mut UnixStream) -> ParsingError<Self>{
-
 		debug!("reading request");
 		let raw_msg = read_message(stream)?;
 		let mut buf = raw_msg.as_slice();
@@ -133,11 +132,11 @@ impl Request {
 	}
 }
 
-enum MessageResponse {
-	AgentFailure = 5,
-	AgentSuccess = 6,
-	AgentIdentitiesAnswer = 12,
-	AgentSignResponse = 14,
+enum AgentMessageResponse {
+	Failure = 5,
+	Success = 6,
+	IdentitiesAnswer = 12,
+	SignResponse = 14,
 }
 
 #[derive(Clone, Debug)]
@@ -146,6 +145,7 @@ pub struct Identity {
     pub key_comment: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum Response {
     Success,
@@ -158,14 +158,13 @@ pub enum Response {
 }
 
 impl Response {
-
 	pub fn write(&self, stream: &mut UnixStream) -> WrittingError<()>{
 		let mut buf = Vec::new();
 	    match *self {
-            Response::Success => buf.write_u8(MessageResponse::AgentSuccess as u8)?,
-            Response::Failure => buf.write_u8(MessageResponse::AgentFailure as u8)?,
+            Response::Success => buf.write_u8(AgentMessageResponse::Success as u8)?,
+            Response::Failure => buf.write_u8(AgentMessageResponse::Failure as u8)?,
             Response::Identities(ref identities) => {
-                buf.write_u8(MessageResponse::AgentIdentitiesAnswer as u8)?;
+                buf.write_u8(AgentMessageResponse::IdentitiesAnswer as u8)?;
                 buf.write_u32::<BigEndian>(identities.len() as u32)?;
 
                 for identity in identities {
@@ -174,7 +173,7 @@ impl Response {
                 }
             }
             Response::SignResponse { ref algo_name, ref signature } => {
-                buf.write_u8(MessageResponse::AgentSignResponse as u8)?;
+                buf.write_u8(AgentMessageResponse::SignResponse as u8)?;
 
                 let mut full_sig = Vec::new();
                 write_message(&mut full_sig, algo_name.as_bytes())?;

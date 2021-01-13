@@ -14,7 +14,7 @@ pub trait SSHAgentHandler: Send + Sync {
 				self.identities()
 			}
 			Request::SignRequest {ref pubkey_blob, ref data, ref flags} => {
-				self.sign_request(pubkey_blob.clone(), data.clone(), flags.clone())
+				self.sign_request(pubkey_blob.clone(), data.clone(), *flags)
 			}
 			Request::Unknown => {
 				Ok(Response::Failure)

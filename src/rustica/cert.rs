@@ -51,7 +51,7 @@ pub async fn refresh_certificate_async() -> Option<RusticaCert> {
         key_id: String::from("JITC-Rustica-Agent"),
         challenge_time: response.time,
         critical_options: HashMap::new(),
-        extensions: extensions,
+        extensions,
         servers: vec!["atheris".to_string()],
         principals: vec!["obelisk".to_string()],
         valid_before: 0xFFFFFFFFFFFFFFFF,

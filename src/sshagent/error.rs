@@ -21,17 +21,13 @@ impl Error {
 
 impl From<io::Error> for Error {
     fn from(err: io::Error) -> Error {
-        match err {
-            _ => Error::new("IOError")
-        }
+        Error::new(format!("IOError: {}", err))
     }
 }
 
 
 impl<'a> From<&'a str> for Error {
 	fn from(err: &'a str) -> Error {
-	    match err {
-	        _ => Error::new(err)
-	    }
+	    Error::new(err)
     }
 }

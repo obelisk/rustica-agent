@@ -1,9 +1,9 @@
 #[macro_use] extern crate log;
 
-mod agent;
+mod sshagent;
 mod rustica;
 
-use agent::{Agent, error::Error as AgentError, Identity, SSHAgentHandler, Response};
+use sshagent::{Agent, error::Error as AgentError, Identity, SSHAgentHandler, Response};
 use std::os::unix::net::{UnixListener};
 
 use rustica::refresh_certificate;
@@ -43,15 +43,17 @@ impl SSHAgentHandler for Handler {
                 self.cert = Some(ident.clone());
                 Ok(Response::Identities(vec![ident]))
             },
-            None => Err(agent::error::Error::from("Could not refresh certificate")),
+            None => Err(AgentError::from("Could not refresh certificate")),
         }
     }
 
-    fn sign_request(&mut self, pubkey: Vec<u8>, data: Vec<u8>, flags: u32) -> Result<agent::Response, agent::error::Error> {
+    /// Pubkey is currently unused because the idea is to only ever have a single cert which itself is only
+    /// active for a very small window of time
+    fn sign_request(&mut self, _pubkey: Vec<u8>, data: Vec<u8>, _flags: u32) -> Result<Response, AgentError> {
         let signature = ssh_cert_signer(&data, SlotId::Retired(RetiredSlotId::R13)).unwrap();
         let signature = (&signature[27..]).to_vec();
 
-        let response = agent::Response::SignResponse {
+        let response = Response::SignResponse {
             algo_name: String::from("ecdsa-sha2-nistp256"),
             signature,
         };
