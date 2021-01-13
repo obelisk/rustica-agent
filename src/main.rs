@@ -44,15 +44,22 @@ async fn refresh_certificate() -> Option<Identity> {
         Err(_e) => return None,
     };
 
+    let mut extensions = HashMap::new();
+    extensions.insert(String::from("permit-X11-forwarding"), String::from(""));
+    extensions.insert(String::from("permit-agent-forwarding"), String::from(""));
+    extensions.insert(String::from("permit-port-forwarding"), String::from(""));
+    extensions.insert(String::from("permit-pty"), String::from(""));
+    extensions.insert(String::from("permit-user-rc"), String::from(""));
+
     let response = response.into_inner();
     let challenge_signature = hex::encode(asn_cert_signer(&hex::decode(&response.challenge).unwrap(), user_key_slot).unwrap());
     let request = tonic::Request::new(CertificateRequest {
         pubkey: encoded_key.to_string(),
         cert_type: 1,
-        key_id: String::from("JITC:obelisk@exclave"),
+        key_id: String::from("JITC-Rustica-Agent"),
         challenge_time: response.time,
         critical_options: HashMap::new(),
-        extensions: HashMap::new(),
+        extensions: extensions,
         servers: vec!["atheris".to_string()],
         principals: vec!["obelisk".to_string()],
         valid_before: 0xFFFFFFFFFFFFFFFF,
