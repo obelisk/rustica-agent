@@ -71,7 +71,8 @@ impl Handler {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {    
+fn main() -> Result<(), Box<dyn std::error::Error>> {  
+    env_logger::init();  
     println!("Starting Rustica Agent");
 
     let socket_path = "rustica.sock";

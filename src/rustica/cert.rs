@@ -1,7 +1,8 @@
 use rustica::rustica_client::{RusticaClient};
 use rustica::{CertificateRequest, ChallengeRequest};
 
-use rustica_sshkey::yubikey::{asn_cert_signer, ssh_cert_fetch_pubkey};
+use rustica_sshkey::yubikey::{ssh_cert_fetch_pubkey};
+use rustica_sshkey::yubikey::{AlgorithmId, sign_data};
 
 use std::collections::HashMap;
 use tokio::runtime::Runtime;
@@ -44,7 +45,22 @@ pub async fn refresh_certificate_async() -> Option<RusticaCert> {
     extensions.insert(String::from("permit-user-rc"), String::from(""));
 
     let response = response.into_inner();
-    let challenge_signature = hex::encode(asn_cert_signer(&hex::decode(&response.challenge).unwrap(), user_key_slot).unwrap());
+    let decoded_challenge = match hex::decode(&response.challenge) {
+        Ok(dc) => dc,
+        Err(_) => {
+            error!("Server returned a bad challenge");
+            return None;
+        }
+    };
+
+    let challenge_signature = match sign_data(&decoded_challenge, AlgorithmId::EccP256, user_key_slot) {
+        Ok(v) => hex::encode(v),
+        Err(_) => {
+            error!("Couldn't sign challenge with YubiKey. Is it connected and configured?");
+            return None;
+        }
+    };
+
     let request = tonic::Request::new(CertificateRequest {
         pubkey: encoded_key.to_string(),
         cert_type: 1,
