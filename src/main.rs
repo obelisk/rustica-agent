@@ -7,7 +7,7 @@ use sshagent::{Agent, error::Error as AgentError, Identity, SSHAgentHandler, Res
 use std::os::unix::net::{UnixListener};
 
 use rustica::refresh_certificate;
-use rustica_sshkey::yubikey::ssh_cert_signer;
+use rustica_keys::yubikey::ssh_cert_signer;
 
 use std::time::SystemTime;
 use yubikey_piv::key::{RetiredSlotId, SlotId};

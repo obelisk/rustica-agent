@@ -1,8 +1,7 @@
 use rustica::rustica_client::{RusticaClient};
 use rustica::{CertificateRequest, ChallengeRequest};
 
-use rustica_sshkey::yubikey::{ssh_cert_fetch_pubkey};
-use rustica_sshkey::yubikey::{AlgorithmId, sign_data};
+use rustica_keys::yubikey::{AlgorithmId, sign_data, ssh_cert_fetch_pubkey};
 
 use std::collections::HashMap;
 use tokio::runtime::Runtime;
