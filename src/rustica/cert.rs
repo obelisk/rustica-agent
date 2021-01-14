@@ -60,6 +60,10 @@ pub async fn refresh_certificate_async() -> Option<RusticaCert> {
         }
     };
 
+    // We don't request any servers because Rustica will give us a cert good for all
+    // certs we have access to. For that reason we also don't have to request any principals
+    // as our allowed principals are tied to the fingerprint of our public key. The fields
+    // are part of the API for future expansion to allow requesting of restricted certs
     let request = tonic::Request::new(CertificateRequest {
         pubkey: encoded_key.to_string(),
         cert_type: 1,
@@ -67,8 +71,8 @@ pub async fn refresh_certificate_async() -> Option<RusticaCert> {
         challenge_time: response.time,
         critical_options: HashMap::new(),
         extensions,
-        servers: vec!["atheris".to_string()],
-        principals: vec!["obelisk".to_string()],
+        servers: vec![],
+        principals: vec![],
         valid_before: 0xFFFFFFFFFFFFFFFF,
         valid_after: 0x0,
         challenge: response.challenge,
@@ -81,13 +85,21 @@ pub async fn refresh_certificate_async() -> Option<RusticaCert> {
     };
 
     let response = match client.certificate(request).await {
-        Ok(r) => r,
+        Ok(r) => r.into_inner(),
         Err(_e) => return None,
     };
 
-    let response = response.into_inner();
-    let cert: Vec<&str> = response.certificate.split(' ').collect();
+    match &response {
+        response if (response.error_code == 0) => (),
+        e_response => {
+            error!("Rustica returned error code: {} - {}", e_response.error_code, e_response.error);
+            return None
+        }
+    };
 
+    let cert: Vec<&str> = response.certificate.split(' ').collect();
+    let parsed_cert = rustica_keys::Certificate::from_string(&response.certificate).unwrap();
+    debug!("{:#}", parsed_cert);
     Some(RusticaCert {
         cert: base64::decode(cert[1]).unwrap(),
         comment: "JITC".to_string(),

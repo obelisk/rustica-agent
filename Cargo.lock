@@ -1221,7 +1221,6 @@ version = "0.1.0"
 dependencies = [
  "base64 0.12.3",
  "byteorder",
- "hex",
  "ring",
  "sha2",
  "yubikey-piv",
