@@ -1,11 +1,11 @@
 use rustica::rustica_client::{RusticaClient};
 use rustica::{CertificateRequest, ChallengeRequest};
 
-use rustica_keys::yubikey::{AlgorithmId, sign_data, ssh_cert_fetch_pubkey};
+use rustica_keys::yubikey::{AlgorithmId, sign_data, ssh::ssh_cert_fetch_pubkey};
 
 use std::collections::HashMap;
 use tokio::runtime::Runtime;
-use yubikey_piv::key::{RetiredSlotId, SlotId};
+use yubikey_piv::key::SlotId;
 
 pub mod rustica {
     tonic::include_proto!("rustica");
@@ -16,8 +16,7 @@ pub struct RusticaCert {
     pub comment: String,
 }
 
-pub async fn refresh_certificate_async() -> Option<RusticaCert> {
-    let user_key_slot = SlotId::Retired(RetiredSlotId::R13);
+pub async fn refresh_certificate_async(user_key_slot: SlotId) -> Option<RusticaCert> {
     let ssh_pubkey = ssh_cert_fetch_pubkey(user_key_slot).unwrap();
     
     let encoded_key = format!("{}", ssh_pubkey);
@@ -52,7 +51,7 @@ pub async fn refresh_certificate_async() -> Option<RusticaCert> {
         }
     };
 
-    let challenge_signature = match sign_data(&decoded_challenge, AlgorithmId::EccP256, user_key_slot) {
+    let challenge_signature = match sign_data(&decoded_challenge, AlgorithmId::EccP384, user_key_slot) {
         Ok(v) => hex::encode(v),
         Err(_) => {
             error!("Couldn't sign challenge with YubiKey. Is it connected and configured?");
@@ -100,14 +99,15 @@ pub async fn refresh_certificate_async() -> Option<RusticaCert> {
     let cert: Vec<&str> = response.certificate.split(' ').collect();
     let parsed_cert = rustica_keys::Certificate::from_string(&response.certificate).unwrap();
     debug!("{:#}", parsed_cert);
+    debug!("{}", parsed_cert);
     Some(RusticaCert {
         cert: base64::decode(cert[1]).unwrap(),
         comment: "JITC".to_string(),
     })
 }
 
-pub fn refresh_certificate() -> Option<RusticaCert> {
+pub fn refresh_certificate(slot: SlotId) -> Option<RusticaCert> {
     Runtime::new().unwrap().block_on(async {
-        refresh_certificate_async().await
+        refresh_certificate_async(slot).await
     })
 }
