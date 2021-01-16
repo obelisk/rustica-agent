@@ -1,7 +1,7 @@
 use rustica::rustica_client::{RusticaClient};
 use rustica::{CertificateRequest, ChallengeRequest};
 
-use rustica_keys::yubikey::{AlgorithmId, sign_data, ssh::ssh_cert_fetch_pubkey};
+use rustica_keys::yubikey::{sign_data, ssh::{ssh_cert_fetch_pubkey, get_ssh_key_type}};
 
 use std::collections::HashMap;
 use tokio::runtime::Runtime;
@@ -50,8 +50,12 @@ pub async fn refresh_certificate_async(user_key_slot: SlotId) -> Option<RusticaC
             return None;
         }
     };
+    let alg = match get_ssh_key_type(user_key_slot) {
+        Some(x) => x,
+        None => return None,
+    };
 
-    let challenge_signature = match sign_data(&decoded_challenge, AlgorithmId::EccP384, user_key_slot) {
+    let challenge_signature = match sign_data(&decoded_challenge, alg, user_key_slot) {
         Ok(v) => hex::encode(v),
         Err(_) => {
             error!("Couldn't sign challenge with YubiKey. Is it connected and configured?");
