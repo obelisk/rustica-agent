@@ -16,9 +16,9 @@ impl Agent {
 		debug!("handling new connection");
 		loop {
 			let req = Request::read(&mut stream)?;
-			debug!("request: {:?}", req);
+			trace!("request: {:?}", req);
 			let response = handler.lock().unwrap().handle_request(req)?;
-			debug!("handler: {:?}", response);
+			trace!("handler: {:?}", response);
 			response.write(&mut stream)?;
 		}
 
