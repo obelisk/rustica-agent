@@ -102,11 +102,28 @@ fn provision_new_key(slot: SlotId, pin: &str, alg: &str, secure: bool) {
     }
 }
 
-fn slot_validator(slot: &str) -> Result<(), String> {
-    if SlotId::try_from(slot.to_owned()).is_err() {
-        Err(String::from("Provided slot was not valid. Should be between: 0x82 and 0x95 (specified without the 0x prefix)"))
+fn slot_parser(slot: &str) -> Option<SlotId> {
+    // If first character is R, then we need to parse the nice
+    // notation
+    if (slot.len() == 2 || slot.len() == 3) && slot.chars().nth(0).unwrap() == 'R' {
+        let slot_value = slot[1..].parse::<u8>();
+        match slot_value {
+            Ok(v) if v <= 20 => Some(SlotId::try_from(0x81_u8 + v).unwrap()),
+            _ => None,
+        }
     } else {
-        Ok(())
+        if let Ok(s) = SlotId::try_from(slot.to_owned()) {
+            Some(s)
+        } else {
+            None
+        }
+    }
+}
+
+fn slot_validator(slot: &str) -> Result<(), String> {
+    match slot_parser(slot) {
+        Some(_) => Ok(()),
+        None => Err(String::from("Provided slot was not valid. Should be R1 - R20 or a raw hex identifier")),
     }
 }
 
@@ -152,7 +169,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get_matches();
 
     let slot = match matches.value_of("slot") {
-        Some(x) => SlotId::try_from(x.to_owned()).unwrap(),
+        // We unwrap here because we have already run the validator above
+        Some(x) => slot_parser(x).unwrap(),
         None => SlotId::Retired(RetiredSlotId::R17),
     };
 
