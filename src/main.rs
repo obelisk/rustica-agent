@@ -28,6 +28,7 @@ use yubikey_piv::policy::TouchPolicy;
 
 
 struct Handler {
+    server_address: String,
     cert: Option<Identity>,
     signatory: Signatory,
     stale_at: u64,
@@ -36,6 +37,7 @@ struct Handler {
 impl SSHAgentHandler for Handler {
     fn new() -> Self {
         Handler {
+            server_address: String::new(),
             cert: None,
             signatory: Signatory::Yubikey(SlotId::Retired(RetiredSlotId::R3)),
             stale_at: 0,
@@ -50,7 +52,7 @@ impl SSHAgentHandler for Handler {
                 return Ok(Response::Identities(vec![cert.clone()]));
             }
         }
-        match refresh_certificate(&self.signatory) {
+        match refresh_certificate(&self.server_address, &self.signatory) {
             Some(response) => {
                 info!("{:#}", Certificate::from_string(&response.cert).unwrap());
                 let cert: Vec<&str> = response.cert.split(' ').collect();
@@ -141,6 +143,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .author("Mitchell Grenier <mitchell@confurious.io>")
         .about("The SSH Agent component of Rustica")
         .arg(
+            Arg::new("server")
+                .about("Full address of Rustica server to use as CA")
+                .default_value("http://[::1]:50051")
+                .long("server")
+                .short('r')
+                .takes_value(true),
+        )
+        .arg(
             Arg::new("slot")
                 .about("Numerical value for the slot on the yubikey to use for your private key")
                 .default_value("R3")
@@ -225,6 +235,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .get_matches();
 
+    let server_address = matches.value_of("server").unwrap().to_owned();
+
     let signatory = match matches.value_of("file") {
         Some(file) => Signatory::Direct(PrivateKey::from_path(file)?),
         None => Signatory::Yubikey(slot_parser(matches.value_of("slot").unwrap()).unwrap()),
@@ -263,7 +275,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ct = CertType::try_from(matches.value_of("kind").unwrap()).unwrap();
         let expiration_time = current_timestamp + matches.value_of("duration").unwrap().parse::<u64>().unwrap_or(0xFFFFFFFFFFFFFFFF);
 
-        match rustica::cert::get_custom_certificate(&signatory, ct, principals, expiration_time) {
+        match rustica::cert::get_custom_certificate(&server_address, &signatory, ct, principals, expiration_time) {
             Some(x) => {
                 let cert = rustica_keys::Certificate::from_string(&x.cert).unwrap();
                 println!("Certificate Details!");
@@ -299,6 +311,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("SSH_AUTH_SOCK={}; export SSH_AUTH_SOCK;", socket_path.to_string_lossy());
 
     let handler = Handler {
+        server_address,
         cert: None,
         signatory,
         stale_at: 0,

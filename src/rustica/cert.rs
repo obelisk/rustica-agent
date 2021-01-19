@@ -23,7 +23,7 @@ pub enum Signatory {
     Direct(PrivateKey),
 }
 
-pub async fn refresh_certificate_async(signatory: &Signatory, kind: CertType, principals: Vec<String>, requested_expiration: u64) -> Option<RusticaCert> {
+pub async fn refresh_certificate_async(server_address: &String, signatory: &Signatory, kind: CertType, principals: Vec<String>, requested_expiration: u64) -> Option<RusticaCert> {
     let ssh_pubkey = match signatory {
         Signatory::Yubikey(user_key_slot) => ssh_cert_fetch_pubkey(*user_key_slot).unwrap(),
         Signatory::Direct(ref privkey) => privkey.pubkey.clone(),
@@ -35,7 +35,7 @@ pub async fn refresh_certificate_async(signatory: &Signatory, kind: CertType, pr
         pubkey: encoded_key.to_string(),
     });
 
-    let mut client = match RusticaClient::connect("http://[::1]:50051").await {
+    let mut client = match RusticaClient::connect(server_address.clone()).await {
         Ok(client) => client,
         Err(_e) => return None,
     };
@@ -121,7 +121,7 @@ pub async fn refresh_certificate_async(signatory: &Signatory, kind: CertType, pr
         challenge_signature,
     });
 
-    let mut client = match RusticaClient::connect("http://[::1]:50051").await {
+    let mut client = match RusticaClient::connect(server_address.clone()).await {
         Ok(c) => c,
         Err(_e) => return None,
     };
@@ -145,14 +145,14 @@ pub async fn refresh_certificate_async(signatory: &Signatory, kind: CertType, pr
     })
 }
 
-pub fn refresh_certificate(signatory: &Signatory) -> Option<RusticaCert> {
+pub fn refresh_certificate(server_address: &String, signatory: &Signatory) -> Option<RusticaCert> {
     Runtime::new().unwrap().block_on(async {
-        refresh_certificate_async(signatory, CertType::User, vec![], 0xFFFFFFFFFFFFFFFF).await
+        refresh_certificate_async(server_address, signatory, CertType::User, vec![], 0xFFFFFFFFFFFFFFFF).await
     })
 }
 
-pub fn get_custom_certificate(signatory: &Signatory, kind: CertType, principals: Vec<String>, expiration_time: u64) -> Option<RusticaCert> {
+pub fn get_custom_certificate(server_address: &String, signatory: &Signatory, kind: CertType, principals: Vec<String>, expiration_time: u64) -> Option<RusticaCert> {
     Runtime::new().unwrap().block_on(async {
-        refresh_certificate_async(signatory, kind, principals, expiration_time).await
+        refresh_certificate_async(server_address, signatory, kind, principals, expiration_time).await
     })
 }
