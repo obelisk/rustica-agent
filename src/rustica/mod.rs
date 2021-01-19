@@ -1,8 +1,10 @@
 pub mod cert;
+pub mod error;
 
 pub use cert::{
     RusticaCert,
+    RusticaServer,
     Signatory,
-    refresh_certificate,
-    refresh_certificate_async
 };
+
+pub use error::RefreshError;

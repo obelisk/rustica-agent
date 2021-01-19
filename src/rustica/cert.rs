@@ -1,12 +1,15 @@
+use super::error::{RefreshError, ServerError};
+
 use rustica::rustica_client::{RusticaClient};
 use rustica::{CertificateRequest, ChallengeRequest};
 
-use rustica_keys::ssh::{PrivateKey, PublicKeyKind, PrivateKeyKind};
-use rustica_keys::ssh::{CertType, CurveKind};
+use rustica_keys::ssh::{CertType, CriticalOptions, CurveKind, Extensions, PrivateKey, PublicKeyKind, PrivateKeyKind};
 use rustica_keys::yubikey::{sign_data, ssh::{ssh_cert_fetch_pubkey, get_ssh_key_type}};
 
+use ring::{rand, signature};
 use std::collections::HashMap;
 use tokio::runtime::Runtime;
+//use tonic::transport::{Certificate, Channel, ClientTlsConfig};
 use yubikey_piv::key::SlotId;
 
 pub mod rustica {
@@ -23,7 +26,12 @@ pub enum Signatory {
     Direct(PrivateKey),
 }
 
-pub async fn refresh_certificate_async(server_address: &String, signatory: &Signatory, kind: CertType, principals: Vec<String>, requested_expiration: u64) -> Option<RusticaCert> {
+pub struct RusticaServer {
+    pub address: String,
+    pub ca: String,
+}
+
+pub async fn refresh_certificate_async(server: &RusticaServer, signatory: &Signatory, kind: CertType, principals: Vec<String>, requested_expiration: u64) -> Result<RusticaCert, RefreshError> {
     let ssh_pubkey = match signatory {
         Signatory::Yubikey(user_key_slot) => ssh_cert_fetch_pubkey(*user_key_slot).unwrap(),
         Signatory::Direct(ref privkey) => privkey.pubkey.clone(),
@@ -35,69 +43,49 @@ pub async fn refresh_certificate_async(server_address: &String, signatory: &Sign
         pubkey: encoded_key.to_string(),
     });
 
-    let mut client = match RusticaClient::connect(server_address.clone()).await {
-        Ok(client) => client,
-        Err(_e) => return None,
-    };
-
-    let response = match client.challenge(request).await {
-        Ok(response) => response,
-        Err(_e) => return None,
-    };
-
-    let mut extensions = HashMap::new();
-    extensions.insert(String::from("permit-X11-forwarding"), String::from(""));
-    extensions.insert(String::from("permit-agent-forwarding"), String::from(""));
-    extensions.insert(String::from("permit-port-forwarding"), String::from(""));
-    extensions.insert(String::from("permit-pty"), String::from(""));
-    extensions.insert(String::from("permit-user-rc"), String::from(""));
+    let mut client = RusticaClient::connect(server.address.clone()).await?;
+    let response = client.challenge(request).await?;
 
     let response = response.into_inner();
-    let decoded_challenge = match hex::decode(&response.challenge) {
-        Ok(dc) => dc,
-        Err(_) => {
-            error!("Server returned a bad challenge");
-            return None;
-        }
-    };
+    let decoded_challenge = hex::decode(&response.challenge)?;
 
     let challenge_signature = match signatory {
         Signatory::Yubikey(user_key_slot) => {
-            let alg = get_ssh_key_type(*user_key_slot)?;
+            let alg = match get_ssh_key_type(*user_key_slot){
+                Some(alg) => alg,
+                None => return Err(RefreshError::SigningError),
+            };
 
             match sign_data(&decoded_challenge, alg, *user_key_slot) {
                 Ok(v) => hex::encode(v),
                 Err(_) => {
-                    error!("Couldn't sign challenge with YubiKey. Is it connected and configured?");
-                    return None;
+                    return Err(RefreshError::SigningError);
                 }
             }
         },
         Signatory::Direct(privkey) => {
-            use ring::{rand, signature};
             let rng = rand::SystemRandom::new();
 
             match &privkey.kind {
-                PrivateKeyKind::Rsa(_) => return None,
+                PrivateKeyKind::Rsa(_) => return Err(RefreshError::UnsupportedMode),
                 PrivateKeyKind::Ecdsa(key) => {
                     let alg = match key.curve.kind {
                         CurveKind::Nistp256 => &signature::ECDSA_P256_SHA256_ASN1_SIGNING,
                         CurveKind::Nistp384 => &signature::ECDSA_P384_SHA384_ASN1_SIGNING,
-                        CurveKind::Nistp521 => return None,
+                        CurveKind::Nistp521 => return Err(RefreshError::UnsupportedMode),
                     };
 
                     let pubkey = match &privkey.pubkey.kind {
                         PublicKeyKind::Ecdsa(key) => &key.key,
-                        _ => return None,
+                        _ => return Err(RefreshError::UnsupportedMode),
                     };
 
                     let key = if key.key[0] == 0x0_u8 {&key.key[1..]} else {&key.key};
                     let key_pair = signature::EcdsaKeyPair::from_private_key_and_public_key(alg, &key, &pubkey).unwrap();
-                    //from_private_key_and_public_key
-                    //let key_pair = signature::EcdsaKeyPair::from_pkcs8(alg, &key.key).unwrap();
+
                     hex::encode(key_pair.sign(&rng, &decoded_challenge).unwrap())
                 },
-                PrivateKeyKind::Ed25519(_) => return None,
+                PrivateKeyKind::Ed25519(_) => return Err(RefreshError::UnsupportedMode),
             }
         },
     };
@@ -111,8 +99,8 @@ pub async fn refresh_certificate_async(server_address: &String, signatory: &Sign
         cert_type: kind as u32,
         key_id: String::from(""),           // Rustica Server ignores this field
         challenge_time: response.time,
-        critical_options: HashMap::new(),
-        extensions,
+        critical_options: HashMap::from(CriticalOptions::None),
+        extensions: HashMap::from(Extensions::Standard),
         servers: vec![],
         principals,
         valid_before: requested_expiration,
@@ -121,38 +109,31 @@ pub async fn refresh_certificate_async(server_address: &String, signatory: &Sign
         challenge_signature,
     });
 
-    let mut client = match RusticaClient::connect(server_address.clone()).await {
-        Ok(c) => c,
-        Err(_e) => return None,
-    };
+    let response = client.certificate(request).await?;
+    let response = response.into_inner();
 
-    let response = match client.certificate(request).await {
-        Ok(r) => r.into_inner(),
-        Err(_e) => return None,
-    };
+    if response.error_code != 0 {
+        return Err(RefreshError::RusticaServerError(
+            ServerError {
+                code: response.error_code,
+                message: response.error,
+            }))
+    }
 
-    match &response {
-        response if (response.error_code == 0) => (),
-        e_response => {
-            error!("Rustica returned error code: {} - {}", e_response.error_code, e_response.error);
-            return None
-        }
-    };
-
-    Some(RusticaCert {
+    Ok(RusticaCert {
         cert: response.certificate,
         comment: "JITC".to_string(),
     })
 }
 
-pub fn refresh_certificate(server_address: &String, signatory: &Signatory) -> Option<RusticaCert> {
+pub fn refresh_certificate(server: &RusticaServer, signatory: &Signatory) -> Result<RusticaCert, RefreshError> {
     Runtime::new().unwrap().block_on(async {
-        refresh_certificate_async(server_address, signatory, CertType::User, vec![], 0xFFFFFFFFFFFFFFFF).await
+        refresh_certificate_async(server, signatory, CertType::User, vec![], 0xFFFFFFFFFFFFFFFF).await
     })
 }
 
-pub fn get_custom_certificate(server_address: &String, signatory: &Signatory, kind: CertType, principals: Vec<String>, expiration_time: u64) -> Option<RusticaCert> {
+pub fn get_custom_certificate(server: &RusticaServer, signatory: &Signatory, kind: CertType, principals: Vec<String>, expiration_time: u64) -> Result<RusticaCert, RefreshError> {
     Runtime::new().unwrap().block_on(async {
-        refresh_certificate_async(server_address, signatory, kind, principals, expiration_time).await
+        refresh_certificate_async(server, signatory, kind, principals, expiration_time).await
     })
 }

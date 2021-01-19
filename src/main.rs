@@ -10,7 +10,7 @@ use std::env;
 use std::os::unix::net::{UnixListener};
 use std::process;
 
-use rustica::{Signatory, refresh_certificate};
+use rustica::{cert, RusticaServer, Signatory};
 use rustica_keys::ssh::{PrivateKey, Certificate, CertType};
 use rustica_keys::yubikey::{
     provision,
@@ -22,28 +22,21 @@ use rustica_keys::yubikey::{
 };
 
 use std::convert::TryFrom;
+use std::fs::File;
+use std::io::{Read};
 use std::time::SystemTime;
-use yubikey_piv::key::{AlgorithmId, RetiredSlotId, SlotId};
+use yubikey_piv::key::{AlgorithmId, SlotId};
 use yubikey_piv::policy::TouchPolicy;
 
 
 struct Handler {
-    server_address: String,
+    server: RusticaServer,
     cert: Option<Identity>,
     signatory: Signatory,
     stale_at: u64,
 }
 
 impl SSHAgentHandler for Handler {
-    fn new() -> Self {
-        Handler {
-            server_address: String::new(),
-            cert: None,
-            signatory: Signatory::Yubikey(SlotId::Retired(RetiredSlotId::R3)),
-            stale_at: 0,
-        }
-    }
-
     fn identities(&mut self) -> Result<Response, AgentError> {
         let timestamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
         if let Some(cert) = &self.cert {
@@ -52,8 +45,8 @@ impl SSHAgentHandler for Handler {
                 return Ok(Response::Identities(vec![cert.clone()]));
             }
         }
-        match refresh_certificate(&self.server_address, &self.signatory) {
-            Some(response) => {
+        match cert::refresh_certificate(&self.server, &self.signatory) {
+            Ok(response) => {
                 info!("{:#}", Certificate::from_string(&response.cert).unwrap());
                 let cert: Vec<&str> = response.cert.split(' ').collect();
                 let raw_cert = base64::decode(cert[1]).unwrap_or(vec![]);
@@ -64,7 +57,10 @@ impl SSHAgentHandler for Handler {
                 self.cert = Some(ident.clone());
                 Ok(Response::Identities(vec![ident]))
             },
-            None => Err(AgentError::from("Could not refresh certificate")),
+            Err(e) => {
+                error!("Refresh certificate error: {:?}", e);
+                Err(AgentError::from("Could not refresh certificate"))
+            },
         }
     }
 
@@ -78,12 +74,10 @@ impl SSHAgentHandler for Handler {
 
                 let pubkey = ssh_cert_fetch_pubkey(slot).unwrap();
 
-                let response = Response::SignResponse {
+                Ok(Response::SignResponse {
                     algo_name: String::from(pubkey.key_type.name),
                     signature,
-                };
-
-                Ok(response)
+                })
             },
             Signatory::Direct(_) => Err(AgentError::from("unimplemented"))
         }
@@ -148,6 +142,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .default_value("http://[::1]:50051")
                 .long("server")
                 .short('r')
+                .takes_value(true),
+        )
+        .arg(
+            Arg::new("serverpem")
+                .about("Path to PEM that contains server public key")
+                .long("serverpem")
+                .short('c')
                 .takes_value(true),
         )
         .arg(
@@ -234,8 +235,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
         )
         .get_matches();
+    
+    let address = matches.value_of("server").unwrap().to_owned();
 
-    let server_address = matches.value_of("server").unwrap().to_owned();
+    let ca = if address.starts_with("https") {
+        let path = match matches.value_of("serverpem") {
+            Some(v) => v,
+            None => {
+                error!("You requested an HTTPS server address but no server pem for identification");
+                return Ok(());
+            }
+        };
+        let mut contents = String::new();
+        File::open(path)?.read_to_string(&mut contents)?;
+        contents
+    } else {
+        String::new()
+    };
+
+    let server = RusticaServer {
+        address,
+        ca,
+    };
 
     let signatory = match matches.value_of("file") {
         Some(file) => Signatory::Direct(PrivateKey::from_path(file)?),
@@ -275,8 +296,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ct = CertType::try_from(matches.value_of("kind").unwrap()).unwrap();
         let expiration_time = current_timestamp + matches.value_of("duration").unwrap().parse::<u64>().unwrap_or(0xFFFFFFFFFFFFFFFF);
 
-        match rustica::cert::get_custom_certificate(&server_address, &signatory, ct, principals, expiration_time) {
-            Some(x) => {
+        match cert::get_custom_certificate(&server, &signatory, ct, principals, expiration_time) {
+            Ok(x) => {
                 let cert = rustica_keys::Certificate::from_string(&x.cert).unwrap();
                 println!("Certificate Details!");
                 println!("{:#}", &cert);
@@ -284,7 +305,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Raw Certificate: ");
                 println!("{}", &cert);
             }
-            None => println!("A certificate was not returned from the server"),
+            Err(e) => println!("Error: {:?}", e),
         }
         return Ok(());
     }    
@@ -297,21 +318,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Access Fingerprint: {}", pubkey.fingerprint().hash);
 
-    /*
-    match ssh_cert_fetch_pubkey(slot) {
-        Some(x) => println!("Access Fingerprint: {}", x.fingerprint().hash),
-        None => {
-            println!("There was no configured key in slot {:?}", slot);
-            return Ok(());
-        },
-    };*/
-
     let mut socket_path = env::temp_dir();
     socket_path.push(format!("rustica.{}", process::id()));
     println!("SSH_AUTH_SOCK={}; export SSH_AUTH_SOCK;", socket_path.to_string_lossy());
 
     let handler = Handler {
-        server_address,
+        server,
         cert: None,
         signatory,
         stale_at: 0,
