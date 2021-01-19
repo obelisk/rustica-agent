@@ -10,7 +10,8 @@ use std::env;
 use std::os::unix::net::{UnixListener};
 use std::process;
 
-use rustica::refresh_certificate;
+use rustica::{Signatory, refresh_certificate};
+use rustica_keys::ssh::{PrivateKey, Certificate, CertType};
 use rustica_keys::yubikey::{
     provision,
     ssh::{
@@ -28,7 +29,7 @@ use yubikey_piv::policy::TouchPolicy;
 
 struct Handler {
     cert: Option<Identity>,
-    slot: SlotId,
+    signatory: Signatory,
     stale_at: u64,
 }
 
@@ -36,7 +37,7 @@ impl SSHAgentHandler for Handler {
     fn new() -> Self {
         Handler {
             cert: None,
-            slot: SlotId::Retired(RetiredSlotId::R17),
+            signatory: Signatory::Yubikey(SlotId::Retired(RetiredSlotId::R3)),
             stale_at: 0,
         }
     }
@@ -49,11 +50,14 @@ impl SSHAgentHandler for Handler {
                 return Ok(Response::Identities(vec![cert.clone()]));
             }
         }
-        match refresh_certificate(self.slot) {
-            Some(cert) => {
+        match refresh_certificate(&self.signatory) {
+            Some(response) => {
+                info!("{:#}", Certificate::from_string(&response.cert).unwrap());
+                let cert: Vec<&str> = response.cert.split(' ').collect();
+                let raw_cert = base64::decode(cert[1]).unwrap_or(vec![]);
                 let ident = Identity {
-                    key_blob: cert.cert,
-                    key_comment: cert.comment,
+                    key_blob: raw_cert,
+                    key_comment: response.comment,
                 };
                 self.cert = Some(ident.clone());
                 Ok(Response::Identities(vec![ident]))
@@ -65,21 +69,26 @@ impl SSHAgentHandler for Handler {
     /// Pubkey is currently unused because the idea is to only ever have a single cert which itself is only
     /// active for a very small window of time
     fn sign_request(&mut self, _pubkey: Vec<u8>, data: Vec<u8>, _flags: u32) -> Result<Response, AgentError> {
-        let signature = ssh_cert_signer(&data, self.slot).unwrap();
-        let signature = (&signature[27..]).to_vec();
+        match self.signatory {
+            Signatory::Yubikey(slot) => {
+                let signature = ssh_cert_signer(&data, slot).unwrap();
+                let signature = (&signature[27..]).to_vec();
 
-        let pubkey = ssh_cert_fetch_pubkey(self.slot).unwrap();
+                let pubkey = ssh_cert_fetch_pubkey(slot).unwrap();
 
-        let response = Response::SignResponse {
-            algo_name: String::from(pubkey.key_type.name),
-            signature,
-        };
+                let response = Response::SignResponse {
+                    algo_name: String::from(pubkey.key_type.name),
+                    signature,
+                };
 
-        Ok(response)
+                Ok(response)
+            },
+            Signatory::Direct(_) => Err(AgentError::from("unimplemented"))
+        }
     }
 }
 
-fn provision_new_key(slot: SlotId, pin: &str, alg: &str, secure: bool) {
+fn provision_new_key(slot: SlotId, pin: &str, mgm_key: &[u8], alg: &str, secure: bool) {
     let alg = match alg {
         "eccp256" => AlgorithmId::EccP256,
         _ => AlgorithmId::EccP384,
@@ -94,7 +103,7 @@ fn provision_new_key(slot: SlotId, pin: &str, alg: &str, secure: bool) {
         TouchPolicy::Never
     };
 
-    match provision(pin.as_bytes(), slot, alg, policy) {
+    match provision(pin.as_bytes(), mgm_key, slot, alg, policy) {
         Ok(pk) => {
             convert_to_ssh_pubkey(&pk).unwrap();
         },
@@ -105,18 +114,16 @@ fn provision_new_key(slot: SlotId, pin: &str, alg: &str, secure: bool) {
 fn slot_parser(slot: &str) -> Option<SlotId> {
     // If first character is R, then we need to parse the nice
     // notation
-    if (slot.len() == 2 || slot.len() == 3) && slot.chars().nth(0).unwrap() == 'R' {
+    if (slot.len() == 2 || slot.len() == 3) && slot.starts_with('R') {
         let slot_value = slot[1..].parse::<u8>();
         match slot_value {
             Ok(v) if v <= 20 => Some(SlotId::try_from(0x81_u8 + v).unwrap()),
             _ => None,
         }
+    } else if let Ok(s) = SlotId::try_from(slot.to_owned()) {
+        Some(s)
     } else {
-        if let Ok(s) = SlotId::try_from(slot.to_owned()) {
-            Some(s)
-        } else {
-            None
-        }
+        None
     }
 }
 
@@ -136,62 +143,156 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(
             Arg::new("slot")
                 .about("Numerical value for the slot on the yubikey to use for your private key")
+                .default_value("R3")
                 .long("slot")
                 .short('s')
                 .validator(slot_validator)
                 .takes_value(true),
         )
         .arg(
-            Arg::new("provision")
+            Arg::new("file")
+                .about("Used instead of a slot to provide a private key via file")
+                .long("file")
+                .short('f')
+                .takes_value(true),
+        )
+        .subcommand(
+            App::new("manual")
+                .about("Manually request a certificate from a Rustica server")
+                .arg(
+                    Arg::new("kind")
+                        .about("The type of certificate you want to request")
+                        .default_value("user")
+                        .long("kind")
+                        .short('k')
+                        .possible_value("user")
+                        .possible_value("host")
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::new("duration")
+                        .about("Your request for certificate duration in seconds")
+                        .default_value("10")
+                        .long("duration")
+                        .short('d')
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::new("principals")
+                        .about("A comma separated list of values you are requesting as principals")
+                        .default_value("root")
+                        .short('p')
+                        .takes_value(true),
+                )
+        )
+        .subcommand(
+            App::new("provision")
                 .about("Provision this slot with a new private key. The pin number must be passed as parameter here")
-                .long("provision")
-                .short('p')
-                .requires("slot")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::new("type")
-                .about("Specify the type of key you want to provision (eccp256, eccp384)")
-                .long("type")
-                .short('t')
-                .possible_value("eccp256")
-                .possible_value("eccp384")
-                .requires("provision")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::new("require-touch")
-                .about("Newly provisioned key requires touch for signing operations (touch cached for 15 seconds)")
-                .long("require-touch")
-                .short('r')
-                .requires("provision")
+                .arg(
+                    Arg::new("management-key")
+                        .about("Specify the management key")
+                        .default_value("010203040506070801020304050607080102030405060708")
+                        .long("mgmkey")
+                        .short('m')
+                        .required(true)
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::new("pin")
+                        .about("Specify the pin")
+                        .default_value("123456")
+                        .long("pin")
+                        .short('p')
+                        .required(true)
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::new("type")
+                        .about("Specify the type of key you want to provision")
+                        .default_value("eccp256")
+                        .long("type")
+                        .short('t')
+                        .possible_value("eccp256")
+                        .possible_value("eccp384")
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::new("require-touch")
+                        .about("Newly provisioned key requires touch for signing operations (touch cached for 15 seconds)")
+                        .long("require-touch")
+                        .short('r')
+                )
         )
         .get_matches();
 
-    let slot = match matches.value_of("slot") {
-        // We unwrap here because we have already run the validator above
-        Some(x) => slot_parser(x).unwrap(),
-        None => SlotId::Retired(RetiredSlotId::R17),
+    let signatory = match matches.value_of("file") {
+        Some(file) => Signatory::Direct(PrivateKey::from_path(file)?),
+        None => Signatory::Yubikey(slot_parser(matches.value_of("slot").unwrap()).unwrap()),
     };
 
-    let secure = if matches.is_present("require-touch") {
-        true
-    } else {
-        false
-    };
+    if let Some(ref matches) = matches.subcommand_matches("provision") {
+        let slot = match signatory {
+            Signatory::Yubikey(slot) => slot,
+            Signatory::Direct(_) => {
+                println!("Cannot provision a file, requires a Yubikey slot");
+                return Ok(());
+            }
+        };
 
-    if let Some(pin) = matches.value_of("provision") {
-        provision_new_key(slot, pin, matches.value_of("type").unwrap_or("eccp384"), secure);
+        let secure = matches.is_present("require-touch");
+        let mgm_key = match matches.value_of("management-key") {
+            Some(mgm) => hex::decode(mgm).unwrap(),
+            None => {
+                println!("Management key error");
+                return Ok(());
+            }
+        };
+
+        let pin = matches.value_of("pin").unwrap_or("123456");
+        provision_new_key(slot, pin, &mgm_key, matches.value_of("type").unwrap_or("eccp384"), secure);
+        return Ok(());
     }
 
+    if let Some(ref matches) = matches.subcommand_matches("manual") {
+        let current_timestamp = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+            Ok(ts) => ts.as_secs(),
+            Err(_e) => 0xFFFFFFFFFFFFFFFF,
+        };
+
+        let principals = matches.value_of("principals").unwrap_or("").split(',').map(|s| s.to_string()).collect();
+        let ct = CertType::try_from(matches.value_of("kind").unwrap()).unwrap();
+        let expiration_time = current_timestamp + matches.value_of("duration").unwrap().parse::<u64>().unwrap_or(0xFFFFFFFFFFFFFFFF);
+
+        match rustica::cert::get_custom_certificate(&signatory, ct, principals, expiration_time) {
+            Some(x) => {
+                let cert = rustica_keys::Certificate::from_string(&x.cert).unwrap();
+                println!("Certificate Details!");
+                println!("{:#}", &cert);
+                println!();
+                println!("Raw Certificate: ");
+                println!("{}", &cert);
+            }
+            None => println!("A certificate was not returned from the server"),
+        }
+        return Ok(());
+    }    
+
     println!("Starting Rustica Agent");
+    let pubkey = match signatory {
+        Signatory::Yubikey(slot) => ssh_cert_fetch_pubkey(slot).unwrap(),
+        Signatory::Direct(ref privkey) => privkey.pubkey.clone()
+    };
+
+    println!("Access Fingerprint: {}", pubkey.fingerprint().hash);
+
+    /*
     match ssh_cert_fetch_pubkey(slot) {
         Some(x) => println!("Access Fingerprint: {}", x.fingerprint().hash),
         None => {
             println!("There was no configured key in slot {:?}", slot);
             return Ok(());
         },
-    };
+    };*/
 
     let mut socket_path = env::temp_dir();
     socket_path.push(format!("rustica.{}", process::id()));
@@ -199,7 +300,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let handler = Handler {
         cert: None,
-        slot,
+        signatory,
         stale_at: 0,
     };
 

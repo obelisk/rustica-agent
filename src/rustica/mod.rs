@@ -1,3 +1,8 @@
-mod cert;
+pub mod cert;
 
-pub use cert::{RusticaCert, refresh_certificate, refresh_certificate_async};
+pub use cert::{
+    RusticaCert,
+    Signatory,
+    refresh_certificate,
+    refresh_certificate_async
+};

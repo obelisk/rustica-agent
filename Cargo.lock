@@ -1284,6 +1284,8 @@ version = "0.3.1"
 dependencies = [
  "base64 0.12.3",
  "byteorder",
+ "clap",
+ "hex",
  "log",
  "ring",
  "sha2",
