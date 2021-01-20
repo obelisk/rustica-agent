@@ -242,7 +242,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let path = match matches.value_of("serverpem") {
             Some(v) => v,
             None => {
-                error!("You requested an HTTPS server address but no server pem for identification");
+                error!("You requested an HTTPS server address but no server pem for identification. Use -c to specify the server's public key.");
                 return Ok(());
             }
         };

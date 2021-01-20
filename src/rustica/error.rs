@@ -9,13 +9,15 @@ pub enum RefreshError {
     TransportError,
     SigningError,
     UnsupportedMode,
+    InvalidURI,
     TransportBadStatus(tonic::Status),
     BadEncodedData(hex::FromHexError),
     RusticaServerError(ServerError)
 }
 
 impl From<tonic::transport::Error> for RefreshError {
-    fn from(_e: tonic::transport::Error) -> Self {
+    fn from(e: tonic::transport::Error) -> Self {
+        debug!("Transport Error: {}", e);
         RefreshError::TransportError
     }
 }

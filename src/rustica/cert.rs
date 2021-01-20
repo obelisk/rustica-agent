@@ -9,7 +9,7 @@ use rustica_keys::yubikey::{sign_data, ssh::{ssh_cert_fetch_pubkey, get_ssh_key_
 use ring::{rand, signature};
 use std::collections::HashMap;
 use tokio::runtime::Runtime;
-//use tonic::transport::{Certificate, Channel, ClientTlsConfig};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig};
 use yubikey_piv::key::SlotId;
 
 pub mod rustica {
@@ -43,7 +43,20 @@ pub async fn refresh_certificate_async(server: &RusticaServer, signatory: &Signa
         pubkey: encoded_key.to_string(),
     });
 
-    let mut client = RusticaClient::connect(server.address.clone()).await?;
+    let channel = match Channel::from_shared(server.address.clone()) {
+        Ok(c) => c,
+        Err(_) => return Err(RefreshError::InvalidURI),
+    };
+
+    let channel = if server.address.starts_with("https") {
+        let ca = Certificate::from_pem(&server.ca);
+        let tls = ClientTlsConfig::new().ca_certificate(ca);
+        channel.tls_config(tls)?.connect().await?
+    } else {
+        channel.connect().await?
+    };
+
+    let mut client = RusticaClient::new(channel);
     let response = client.challenge(request).await?;
 
     let response = response.into_inner();
