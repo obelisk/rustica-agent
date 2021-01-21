@@ -84,7 +84,7 @@ impl SSHAgentHandler for Handler {
     }
 }
 
-fn provision_new_key(slot: SlotId, pin: &str, mgm_key: &[u8], alg: &str, secure: bool) {
+fn provision_new_key(slot: SlotId, pin: &str, subj: &str, mgm_key: &[u8], alg: &str, secure: bool) {
     let alg = match alg {
         "eccp256" => AlgorithmId::EccP256,
         _ => AlgorithmId::EccP384,
@@ -99,7 +99,7 @@ fn provision_new_key(slot: SlotId, pin: &str, mgm_key: &[u8], alg: &str, secure:
         TouchPolicy::Never
     };
 
-    match provision(pin.as_bytes(), mgm_key, slot, alg, policy) {
+    match provision(pin.as_bytes(), mgm_key, slot, subj, alg, policy) {
         Ok(pk) => {
             convert_to_ssh_pubkey(&pk).unwrap();
         },
@@ -233,6 +233,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .long("require-touch")
                         .short('r')
                 )
+                .arg(
+                    Arg::new("subject")
+                        .about("Subject of the new cert you're creating (this is only used as a note)")
+                        .default_value("Rustica-AgentQuickProvision")
+                        .long("subj")
+                        .short('j')
+                )
         )
         .get_matches();
     
@@ -273,6 +280,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         let secure = matches.is_present("require-touch");
+        let subj = matches.value_of("subject").unwrap();
         let mgm_key = match matches.value_of("management-key") {
             Some(mgm) => hex::decode(mgm).unwrap(),
             None => {
@@ -282,7 +290,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         let pin = matches.value_of("pin").unwrap_or("123456");
-        provision_new_key(slot, pin, &mgm_key, matches.value_of("type").unwrap_or("eccp384"), secure);
+        provision_new_key(slot, pin, &subj, &mgm_key, matches.value_of("type").unwrap_or("eccp384"), secure);
         return Ok(());
     }
 
