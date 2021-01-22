@@ -21,19 +21,27 @@ use rustica_keys::yubikey::{
     }
 };
 
+use serde_derive::Deserialize;
 use std::convert::TryFrom;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{Read};
 use std::time::SystemTime;
 use yubikey_piv::key::{AlgorithmId, SlotId};
 use yubikey_piv::policy::TouchPolicy;
 
-
+#[derive(Debug)]
 struct Handler {
     server: RusticaServer,
     cert: Option<Identity>,
     signatory: Signatory,
     stale_at: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct Config {
+    server: Option<String>,
+    server_pem: Option<String>,
+    slot: Option<String>,
 }
 
 impl SSHAgentHandler for Handler {
@@ -139,7 +147,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(
             Arg::new("server")
                 .about("Full address of Rustica server to use as CA")
-                .default_value("http://[::1]:50051")
                 .long("server")
                 .short('r')
                 .takes_value(true),
@@ -154,7 +161,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(
             Arg::new("slot")
                 .about("Numerical value for the slot on the yubikey to use for your private key")
-                .default_value("R3")
                 .long("slot")
                 .short('s')
                 .validator(slot_validator)
@@ -242,20 +248,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
         )
         .get_matches();
+
+    // First we read the configuration file and use those unless overriden by
+    // the commandline
+    let config = fs::read_to_string("/etc/rustica/config.toml");
+    let config = match config {
+        Ok(content) => toml::from_str(&content)?,
+        Err(_) =>  Config {
+            server: None,
+            server_pem: None,
+            slot: None,
+        }
+    };
     
-    let address = matches.value_of("server").unwrap().to_owned();
+    let address = match (matches.value_of("server"), &config.server) {
+        (Some(server), _) => server.to_owned(),
+        (_, Some(server)) => server.to_owned(),
+        (None, None) => {
+            error!("A server must be specified either in the config file or on the commandline");
+            return Ok(());
+        }
+    };
 
     let ca = if address.starts_with("https") {
-        let path = match matches.value_of("serverpem") {
-            Some(v) => v,
-            None => {
-                error!("You requested an HTTPS server address but no server pem for identification. Use -c to specify the server's public key.");
+        match (matches.value_of("serverpem"), &config.server_pem) {
+            (Some(v), _) => {
+                let mut contents = String::new();
+                File::open(v)?.read_to_string(&mut contents)?;
+                contents
+            },
+            (_, Some(v)) => v.to_owned(),
+            (None, None) => {
+                error!("You requested an HTTPS server address but no server pem for identification.");
                 return Ok(());
             }
-        };
-        let mut contents = String::new();
-        File::open(path)?.read_to_string(&mut contents)?;
-        contents
+        }
     } else {
         String::new()
     };
@@ -265,9 +292,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ca,
     };
 
+    let slot = match (matches.value_of("slot"), &config.slot) {
+        (Some(slot), _) => slot.to_owned(),
+        (_, Some(slot)) => slot.to_owned(),
+        (None, None) => {
+            error!("A slot must be specified to use as identification");
+            return Ok(());
+        }
+    };
+
+    let slot = match slot_parser(&slot) {
+        Some(s) => s,
+        None => {
+            error!("Chosen slot was invalid. Slot should be of the the form of: R# where # is between 1 and 20 inclusive");
+            return Ok(());
+        }
+    };
+
     let signatory = match matches.value_of("file") {
         Some(file) => Signatory::Direct(PrivateKey::from_path(file)?),
-        None => Signatory::Yubikey(slot_parser(matches.value_of("slot").unwrap()).unwrap()),
+        None => Signatory::Yubikey(slot),
     };
 
     if let Some(ref matches) = matches.subcommand_matches("provision") {
@@ -320,7 +364,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Starting Rustica Agent");
     let pubkey = match signatory {
-        Signatory::Yubikey(slot) => ssh_cert_fetch_pubkey(slot).unwrap(),
+        Signatory::Yubikey(slot) => match ssh_cert_fetch_pubkey(slot) {
+            Some(cert) => cert,
+            None => {
+                println!("There was no keypair found in slot {:?}. Provision one or use another slot.", slot);
+                return Ok(())
+            }
+        },
         Signatory::Direct(ref privkey) => privkey.pubkey.clone()
     };
 

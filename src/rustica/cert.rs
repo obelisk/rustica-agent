@@ -21,11 +21,13 @@ pub struct RusticaCert {
     pub comment: String,
 }
 
+#[derive(Debug)]
 pub enum Signatory {
     Yubikey(SlotId),
     Direct(PrivateKey),
 }
 
+#[derive(Debug)]
 pub struct RusticaServer {
     pub address: String,
     pub ca: String,
