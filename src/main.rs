@@ -198,7 +198,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Arg::new("principals")
                         .about("A comma separated list of values you are requesting as principals")
                         .default_value("root")
-                        .short('p')
+                        .short('n')
+                        .takes_value(true),
+                )
+                .arg(
+                    Arg::new("servers")
+                        .about("A comma separated list of server you are requesting to connect to")
+                        .short('s')
                         .takes_value(true),
                 )
         )
@@ -345,10 +351,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         let principals = matches.value_of("principals").unwrap_or("").split(',').map(|s| s.to_string()).collect();
+        let servers = matches.value_of("servers").unwrap_or("").split(',').map(|s| s.to_string()).collect();
         let ct = CertType::try_from(matches.value_of("kind").unwrap()).unwrap();
         let expiration_time = current_timestamp + matches.value_of("duration").unwrap().parse::<u64>().unwrap_or(0xFFFFFFFFFFFFFFFF);
 
-        match cert::get_custom_certificate(&server, &signatory, ct, principals, expiration_time) {
+        match cert::get_custom_certificate(&server, &signatory, ct, principals, servers, expiration_time) {
             Ok(x) => {
                 let cert = rustica_keys::Certificate::from_string(&x.cert).unwrap();
                 println!("Certificate Details!");
