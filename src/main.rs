@@ -260,11 +260,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = fs::read_to_string("/etc/rustica/config.toml");
     let config = match config {
         Ok(content) => toml::from_str(&content)?,
-        Err(_) =>  Config {
-            server: None,
-            server_pem: None,
-            slot: None,
-        }
+        Err(_) => 
+            Config {
+                server: None,
+                server_pem: None,
+                slot: None,
+            }
     };
     
     let address = match (matches.value_of("server"), &config.server) {
@@ -298,26 +299,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ca,
     };
 
-    let slot = match (matches.value_of("slot"), &config.slot) {
-        (Some(slot), _) => slot.to_owned(),
-        (_, Some(slot)) => slot.to_owned(),
-        (None, None) => {
-            error!("A slot must be specified to use as identification");
-            return Ok(());
-        }
+    let cmd_slot = match matches.value_of("slot") {
+        Some(x) => Some(x.to_owned()),
+        None => None,
     };
 
-    let slot = match slot_parser(&slot) {
-        Some(s) => s,
-        None => {
-            error!("Chosen slot was invalid. Slot should be of the the form of: R# where # is between 1 and 20 inclusive");
+    let signatory = match (&cmd_slot, &config.slot, matches.value_of("file")) {
+        (_, _, Some(file)) => Signatory::Direct(PrivateKey::from_path(file)?),
+        (Some(slot), _, _) | (_, Some(slot), _) => {
+            match slot_parser(slot) {
+                Some(s) => Signatory::Yubikey(s),
+                None => {
+                    error!("Chosen slot was invalid. Slot should be of the the form of: R# where # is between 1 and 20 inclusive");
+                    return Ok(());
+                }
+            }
+        },
+        (None, None, None) => {
+            error!("A slot or file must be specified to use as identification");
             return Ok(());
         }
-    };
-
-    let signatory = match matches.value_of("file") {
-        Some(file) => Signatory::Direct(PrivateKey::from_path(file)?),
-        None => Signatory::Yubikey(slot),
     };
 
     if let Some(ref matches) = matches.subcommand_matches("provision") {
