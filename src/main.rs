@@ -207,6 +207,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .short('s')
                         .takes_value(true),
                 )
+                .arg(
+                    Arg::new("agent")
+                        .about("Continue running as an agent after receiving certificate")
+                        .short('a')
+                )
         )
         .subcommand(
             App::new("provision")
@@ -321,6 +326,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    let pubkey = match signatory {
+        Signatory::Yubikey(slot) => match ssh_cert_fetch_pubkey(slot) {
+            Some(cert) => cert,
+            None => {
+                println!("There was no keypair found in slot {:?}. Provision one or use another slot.", slot);
+                return Ok(())
+            }
+        },
+        Signatory::Direct(ref privkey) => privkey.pubkey.clone()
+    };
+
     if let Some(ref matches) = matches.subcommand_matches("provision") {
         let slot = match signatory {
             Signatory::Yubikey(slot) => slot,
@@ -345,6 +361,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    let mut cert = None;
+    let mut stale_at = 0;
+
     if let Some(ref matches) = matches.subcommand_matches("manual") {
         let current_timestamp = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
             Ok(ts) => ts.as_secs(),
@@ -356,32 +375,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ct = CertType::try_from(matches.value_of("kind").unwrap()).unwrap();
         let expiration_time = current_timestamp + matches.value_of("duration").unwrap().parse::<u64>().unwrap_or(0xFFFFFFFFFFFFFFFF);
 
-        match cert::get_custom_certificate(&server, &signatory, ct, principals, servers, expiration_time) {
+        cert = match cert::get_custom_certificate(&server, &signatory, ct, principals, servers, expiration_time) {
             Ok(x) => {
                 let cert = rustica_keys::Certificate::from_string(&x.cert).unwrap();
-                println!("Certificate Details!");
-                println!("{:#}", &cert);
-                println!();
-                println!("Raw Certificate: ");
-                println!("{}", &cert);
+                println!("Issued Certificate Details:");
+                println!("{:#}\n", &cert);
+                stale_at = cert.valid_before;
+                debug!("Raw Certificate: ");
+                debug!("{}", &cert);
+
+                let cert: Vec<&str> = x.cert.split(' ').collect();
+                let raw_cert = base64::decode(cert[1]).unwrap_or(vec![]);
+                Some(Identity {
+                    key_blob: raw_cert,
+                    key_comment: x.comment,
+                })
             }
-            Err(e) => println!("Error: {:?}", e),
+            Err(e) => {
+                error!("Error: {:?}", e);
+                return Ok(());
+            },
+        };
+
+        if !matches.is_present("agent") {
+            return Ok(());
         }
-        return Ok(());
     }    
 
     println!("Starting Rustica Agent");
-    let pubkey = match signatory {
-        Signatory::Yubikey(slot) => match ssh_cert_fetch_pubkey(slot) {
-            Some(cert) => cert,
-            None => {
-                println!("There was no keypair found in slot {:?}. Provision one or use another slot.", slot);
-                return Ok(())
-            }
-        },
-        Signatory::Direct(ref privkey) => privkey.pubkey.clone()
-    };
-
     println!("Access Fingerprint: {}", pubkey.fingerprint().hash);
 
     let mut socket_path = env::temp_dir();
@@ -390,9 +411,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let handler = Handler {
         server,
-        cert: None,
+        cert,
         signatory,
-        stale_at: 0,
+        stale_at,
     };
 
     let socket = UnixListener::bind(socket_path).unwrap();
