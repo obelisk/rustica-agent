@@ -11,7 +11,8 @@ use std::os::unix::net::{UnixListener};
 use std::process;
 
 use rustica::{cert, RusticaServer, Signatory};
-use rustica_keys::ssh::{PrivateKey, Certificate, CertType};
+use rustica_keys::ssh::{Certificate, CertType, CurveKind, PublicKeyKind, PrivateKey, PrivateKeyKind};
+use rustica_keys::utils::signature_convert_asn1_ecdsa_to_ssh;
 use rustica_keys::yubikey::{
     provision,
     ssh::{
@@ -29,12 +30,12 @@ use std::time::SystemTime;
 use yubikey_piv::key::{AlgorithmId, SlotId};
 use yubikey_piv::policy::TouchPolicy;
 
-#[derive(Debug)]
-struct Handler {
-    server: RusticaServer,
-    cert: Option<Identity>,
-    signatory: Signatory,
-    stale_at: u64,
+#[derive(Debug, Deserialize)]
+struct Options {
+    principals: Option<Vec<String>>,
+    hosts: Option<Vec<String>>,
+    kind: Option<String>,
+    duration: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -42,6 +43,39 @@ struct Config {
     server: Option<String>,
     server_pem: Option<String>,
     slot: Option<String>,
+    options: Option<Options>,
+}
+
+#[derive(Debug)]
+struct Handler {
+    server: RusticaServer,
+    cert: Option<Identity>,
+    signatory: Signatory,
+    stale_at: u64,
+    certificate_options: rustica::CertificateConfig,
+}
+
+impl From<Option<Options>> for rustica::CertificateConfig {
+    fn from(co: Option<Options>) -> rustica::CertificateConfig {
+        match co {
+            None => {
+                rustica::CertificateConfig {
+                    cert_type: CertType::User,
+                    duration: 10,
+                    hosts: vec![],
+                    principals: vec![],
+                }
+            },
+            Some(co) => {
+                rustica::CertificateConfig {
+                    cert_type: CertType::try_from(co.kind.unwrap_or_else(|| String::from("user")).as_str()).unwrap_or(CertType::User),
+                    duration: co.duration.unwrap_or(10),
+                    hosts: co.hosts.unwrap_or_default(),
+                    principals: co.principals.unwrap_or_default(),
+                }
+            }
+        }
+    }
 }
 
 impl SSHAgentHandler for Handler {
@@ -53,11 +87,11 @@ impl SSHAgentHandler for Handler {
                 return Ok(Response::Identities(vec![cert.clone()]));
             }
         }
-        match cert::refresh_certificate(&self.server, &self.signatory) {
+        match cert::get_custom_certificate(&self.server, &self.signatory, &self.certificate_options) {
             Ok(response) => {
                 info!("{:#}", Certificate::from_string(&response.cert).unwrap());
                 let cert: Vec<&str> = response.cert.split(' ').collect();
-                let raw_cert = base64::decode(cert[1]).unwrap_or(vec![]);
+                let raw_cert = base64::decode(cert[1]).unwrap_or_default();
                 let ident = Identity {
                     key_blob: raw_cert,
                     key_comment: response.comment,
@@ -75,19 +109,48 @@ impl SSHAgentHandler for Handler {
     /// Pubkey is currently unused because the idea is to only ever have a single cert which itself is only
     /// active for a very small window of time
     fn sign_request(&mut self, _pubkey: Vec<u8>, data: Vec<u8>, _flags: u32) -> Result<Response, AgentError> {
-        match self.signatory {
+        match &self.signatory {
             Signatory::Yubikey(slot) => {
-                let signature = ssh_cert_signer(&data, slot).unwrap();
+                let signature = ssh_cert_signer(&data, *slot).unwrap();
                 let signature = (&signature[27..]).to_vec();
 
-                let pubkey = ssh_cert_fetch_pubkey(slot).unwrap();
+                let pubkey = ssh_cert_fetch_pubkey(*slot).unwrap();
 
                 Ok(Response::SignResponse {
                     algo_name: String::from(pubkey.key_type.name),
                     signature,
                 })
             },
-            Signatory::Direct(_) => Err(AgentError::from("unimplemented"))
+            Signatory::Direct(privkey) => {
+                let rng = ring::rand::SystemRandom::new();
+
+                match &privkey.kind {
+                    PrivateKeyKind::Rsa(_) => return Err(AgentError::from("unimplemented")),
+                    PrivateKeyKind::Ecdsa(key) => {
+                        let (alg, name) = match key.curve.kind {
+                            CurveKind::Nistp256 => (&ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING, "ecdsa-sha2-nistp256"),
+                            CurveKind::Nistp384 => (&ring::signature::ECDSA_P384_SHA384_ASN1_SIGNING, "ecdsa-sha2-nistp384"),
+                            CurveKind::Nistp521 => return Err(AgentError::from("unimplemented")),
+                        };
+
+                        let pubkey = match &privkey.pubkey.kind {
+                            PublicKeyKind::Ecdsa(key) => &key.key,
+                            _ => return Err(AgentError::from("unimplemented")),
+                        };
+
+                        let key = if key.key[0] == 0x0_u8 {&key.key[1..]} else {&key.key};
+                        let key_pair = ring::signature::EcdsaKeyPair::from_private_key_and_public_key(alg, &key, &pubkey).unwrap();
+
+                        let signature = signature_convert_asn1_ecdsa_to_ssh(key_pair.sign(&rng, &data).unwrap().as_ref()).unwrap();
+                        let signature = (&signature[4..]).to_vec();
+                        return Ok(Response::SignResponse {
+                            algo_name: name.to_string(),
+                            signature,
+                        })
+                    },
+                    PrivateKeyKind::Ed25519(_) => return Err(AgentError::from("unimplemented")),
+                }
+            }
         }
     }
 }
@@ -173,45 +236,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .short('f')
                 .takes_value(true),
         )
-        .subcommand(
-            App::new("manual")
-                .about("Manually request a certificate from a Rustica server")
-                .arg(
-                    Arg::new("kind")
-                        .about("The type of certificate you want to request")
-                        .default_value("user")
-                        .long("kind")
-                        .short('k')
-                        .possible_value("user")
-                        .possible_value("host")
-                        .takes_value(true),
-                )
-                .arg(
-                    Arg::new("duration")
-                        .about("Your request for certificate duration in seconds")
-                        .default_value("10")
-                        .long("duration")
-                        .short('d')
-                        .takes_value(true),
-                )
-                .arg(
-                    Arg::new("principals")
-                        .about("A comma separated list of values you are requesting as principals")
-                        .default_value("root")
-                        .short('n')
-                        .takes_value(true),
-                )
-                .arg(
-                    Arg::new("servers")
-                        .about("A comma separated list of server you are requesting to connect to")
-                        .short('s')
-                        .takes_value(true),
-                )
-                .arg(
-                    Arg::new("agent")
-                        .about("Continue running as an agent after receiving certificate")
-                        .short('a')
-                )
+        .arg(
+            Arg::new("kind")
+                .about("The type of certificate you want to request")
+                .long("kind")
+                .short('k')
+                .possible_value("user")
+                .possible_value("host")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::new("duration")
+                .about("Your request for certificate duration in seconds")
+                .long("duration")
+                .short('d')
+                .takes_value(true),
+        )
+        .arg(
+            Arg::new("principals")
+                .about("A comma separated list of values you are requesting as principals")
+                .short('n')
+                .takes_value(true),
+        )
+        .arg(
+            Arg::new("hosts")
+                .about("A comma separated list of hostnames you are requesting a certificate for")
+                .short('h')
+                .takes_value(true),
+        )
+        .arg(
+            Arg::new("immediate")
+                .about("Immiediately request a certificate. Useful for testing.")
+                .short('i')
         )
         .subcommand(
             App::new("provision")
@@ -265,13 +321,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = fs::read_to_string("/etc/rustica/config.toml");
     let config = match config {
         Ok(content) => toml::from_str(&content)?,
-        Err(_) => 
+        Err(_) => {
             Config {
                 server: None,
                 server_pem: None,
                 slot: None,
+                options: None,
             }
+        }
     };
+
+    let mut certificate_options = rustica::CertificateConfig::from(config.options);
     
     let address = match (matches.value_of("server"), &config.server) {
         (Some(server), _) => server.to_owned(),
@@ -364,18 +424,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cert = None;
     let mut stale_at = 0;
 
-    if let Some(ref matches) = matches.subcommand_matches("manual") {
-        let current_timestamp = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
-            Ok(ts) => ts.as_secs(),
-            Err(_e) => 0xFFFFFFFFFFFFFFFF,
-        };
+    if let Some(principals) =  matches.value_of("principals") {
+        certificate_options.principals = principals.split(',').map(|s| s.to_string()).collect();
+    }
 
-        let principals = matches.value_of("principals").unwrap_or("").split(',').map(|s| s.to_string()).collect();
-        let servers = matches.value_of("servers").unwrap_or("").split(',').map(|s| s.to_string()).collect();
-        let ct = CertType::try_from(matches.value_of("kind").unwrap()).unwrap();
-        let expiration_time = current_timestamp + matches.value_of("duration").unwrap().parse::<u64>().unwrap_or(0xFFFFFFFFFFFFFFFF);
+    if let Some(hosts) = matches.value_of("hosts") {
+        certificate_options.hosts = hosts.split(',').map(|s| s.to_string()).collect();
+    }
 
-        cert = match cert::get_custom_certificate(&server, &signatory, ct, principals, servers, expiration_time) {
+    if let Some(kind) = matches.value_of("kind") {
+        certificate_options.cert_type = CertType::try_from(kind).unwrap_or(CertType::User);
+    }
+
+    if let Some(duration) = matches.value_of("duration") {
+        certificate_options.duration = duration.parse::<u64>().unwrap_or(10);
+    }
+
+    if matches.is_present("immediate") {
+        cert = match cert::get_custom_certificate(&server, &signatory, &certificate_options) {
             Ok(x) => {
                 let cert = rustica_keys::Certificate::from_string(&x.cert).unwrap();
                 println!("Issued Certificate Details:");
@@ -385,7 +451,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 debug!("{}", &cert);
 
                 let cert: Vec<&str> = x.cert.split(' ').collect();
-                let raw_cert = base64::decode(cert[1]).unwrap_or(vec![]);
+                let raw_cert = base64::decode(cert[1]).unwrap_or_default();
                 Some(Identity {
                     key_blob: raw_cert,
                     key_comment: x.comment,
@@ -396,11 +462,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             },
         };
-
-        if !matches.is_present("agent") {
-            return Ok(());
-        }
-    }    
+    }
 
     println!("Starting Rustica Agent");
     println!("Access Fingerprint: {}", pubkey.fingerprint().hash);
@@ -414,6 +476,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cert,
         signatory,
         stale_at,
+        certificate_options,
     };
 
     let socket = UnixListener::bind(socket_path).unwrap();

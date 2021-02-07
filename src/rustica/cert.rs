@@ -8,6 +8,7 @@ use rustica_keys::yubikey::{sign_data, ssh::{ssh_cert_fetch_pubkey, get_ssh_key_
 
 use ring::{rand, signature};
 use std::collections::HashMap;
+use std::time::SystemTime;
 use tokio::runtime::Runtime;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig};
 use yubikey_piv::key::SlotId;
@@ -33,7 +34,15 @@ pub struct RusticaServer {
     pub ca: String,
 }
 
-pub async fn refresh_certificate_async(server: &RusticaServer, signatory: &Signatory, kind: CertType, principals: Vec<String>, servers: Vec<String>, requested_expiration: u64) -> Result<RusticaCert, RefreshError> {
+#[derive(Debug)]
+pub struct CertificateConfig {
+    pub principals: Vec<String>,
+    pub hosts: Vec<String>,
+    pub cert_type: CertType,
+    pub duration: u64,
+}
+
+pub async fn refresh_certificate_async(server: &RusticaServer, signatory: &Signatory, options: &CertificateConfig) -> Result<RusticaCert, RefreshError> {
     let ssh_pubkey = match signatory {
         Signatory::Yubikey(user_key_slot) => ssh_cert_fetch_pubkey(*user_key_slot).unwrap(),
         Signatory::Direct(ref privkey) => privkey.pubkey.clone(),
@@ -104,17 +113,21 @@ pub async fn refresh_certificate_async(server: &RusticaServer, signatory: &Signa
             }
         },
     };
+    let current_timestamp = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(ts) => ts.as_secs(),
+        Err(_e) => 0xFFFFFFFFFFFFFFFF,
+    };
 
     let request = tonic::Request::new(CertificateRequest {
         pubkey: encoded_key.to_string(),
-        cert_type: kind as u32,
+        cert_type: options.cert_type as u32,
         key_id: String::from(""),           // Rustica Server ignores this field
         challenge_time: response.time,
         critical_options: HashMap::from(CriticalOptions::None),
         extensions: HashMap::from(Extensions::Standard),
-        servers,
-        principals,
-        valid_before: requested_expiration,
+        servers: options.hosts.clone(),
+        principals: options.principals.clone(),
+        valid_before: current_timestamp + options.duration,
         valid_after: 0x0,
         challenge: response.challenge,
         challenge_signature,
@@ -137,14 +150,8 @@ pub async fn refresh_certificate_async(server: &RusticaServer, signatory: &Signa
     })
 }
 
-pub fn refresh_certificate(server: &RusticaServer, signatory: &Signatory) -> Result<RusticaCert, RefreshError> {
+pub fn get_custom_certificate(server: &RusticaServer, signatory: &Signatory, options: &CertificateConfig) -> Result<RusticaCert, RefreshError> {
     Runtime::new().unwrap().block_on(async {
-        refresh_certificate_async(server, signatory, CertType::User, vec![], vec![], 0xFFFFFFFFFFFFFFFF).await
-    })
-}
-
-pub fn get_custom_certificate(server: &RusticaServer, signatory: &Signatory, kind: CertType, principals: Vec<String>, servers: Vec<String>, expiration_time: u64) -> Result<RusticaCert, RefreshError> {
-    Runtime::new().unwrap().block_on(async {
-        refresh_certificate_async(server, signatory, kind, principals, servers, expiration_time).await
+        refresh_certificate_async(server, signatory, options).await
     })
 }
