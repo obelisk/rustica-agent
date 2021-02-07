@@ -125,7 +125,7 @@ impl SSHAgentHandler for Handler {
                 let rng = ring::rand::SystemRandom::new();
 
                 match &privkey.kind {
-                    PrivateKeyKind::Rsa(_) => return Err(AgentError::from("unimplemented")),
+                    PrivateKeyKind::Rsa(_) => Err(AgentError::from("unimplemented")),
                     PrivateKeyKind::Ecdsa(key) => {
                         let (alg, name) = match key.curve.kind {
                             CurveKind::Nistp256 => (&ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING, "ecdsa-sha2-nistp256"),
@@ -143,12 +143,12 @@ impl SSHAgentHandler for Handler {
 
                         let signature = signature_convert_asn1_ecdsa_to_ssh(key_pair.sign(&rng, &data).unwrap().as_ref()).unwrap();
                         let signature = (&signature[4..]).to_vec();
-                        return Ok(Response::SignResponse {
+                        Ok(Response::SignResponse {
                             algo_name: name.to_string(),
                             signature,
                         })
                     },
-                    PrivateKeyKind::Ed25519(_) => return Err(AgentError::from("unimplemented")),
+                    PrivateKeyKind::Ed25519(_) => Err(AgentError::from("unimplemented")),
                 }
             }
         }
