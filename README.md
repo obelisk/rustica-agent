@@ -1,3 +1,5 @@
+# THIS PROJECT HAS BEEN MERGED INTO THE MAIN RUSTICA REPOSITORY.
+
 # Rustica Agent
 
 Rustica Agent the agent portion of the Rustica SSHCA. It is designed to be an SSH-Agent that uses keys loaded on a Yubikey though also supports a file, generally for requesting host certs which are not stored on Yubikeys. See command help for more complete documentation on use.
